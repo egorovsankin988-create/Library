@@ -78,10 +78,68 @@ Library.ThemeOrder[1] = "Dark"
 
 local ThemeHooks = {}
 
-local function AddTheme(name, tokens)
+local SURFACE_TOKENS = {"WindowBg", "BarBg", "CardBg", "PopupBg", "DropdownBg", "BoxBg", "TileBg", "WmBg"}
+
+-- Partial themes: every missing token is derived from the theme's own background and text
+-- colours, so scrollbars, popups, borders, hovers etc. match instead of falling back to Dark's greys.
+local function DeriveTheme(given)
+	local bg
+	for _, k in ipairs(SURFACE_TOKENS) do
+		if typeof(given[k]) == "Color3" then bg = given[k] break end
+	end
+	local light = bg and (0.299 * bg.R + 0.587 * bg.G + 0.114 * bg.B) > 0.5
+	local base = (light and Library.Themes.Light) or Library.Themes.Dark
 	local t = {}
-	for k, v in pairs(Library.Themes.Dark) do t[k] = v end
-	for k, v in pairs(tokens or {}) do t[k] = v end
+	for k, v in pairs(given) do t[k] = v end
+	if bg then
+		local text = given.Text or (light and rgb(20, 20, 24) or rgb(255, 255, 255))
+		local function def(k, v) if t[k] == nil then t[k] = v end end
+		def("WindowBg", bg)
+		bg = t.WindowBg
+		def("Text", text)
+		def("BarBg", bg:Lerp(text, 0.02))
+		def("CardBg", t.BarBg)
+		def("BoxBg", t.CardBg:Lerp(text, 0.03))
+		def("TileBg", t.BoxBg)
+		def("DropdownBg", t.BoxBg)
+		def("SliderTrack", t.DropdownBg)
+		def("ToggleOffBg", t.DropdownBg)
+		def("BarLine", t.BarBg:Lerp(text, 0.04))
+		def("BoxBorder", t.BoxBg:Lerp(text, 0.03))
+		def("DropdownBorder", t.DropdownBg:Lerp(text, 0.1))
+		def("DropdownBorderOff", t.DropdownBg:Lerp(text, 0.03))
+		def("TileHover", t.TileBg:Lerp(text, 0.04))
+		def("PopupBg", bg)
+		def("PopupHover", t.PopupBg:Lerp(text, 0.04))
+		def("KnobFill", bg)
+		def("KnobStroke", text:Lerp(bg, 0.03))
+		def("KnobStrokeOff", text:Lerp(bg, 0.4))
+		def("ToggleOffDot", t.ToggleOffBg:Lerp(text, 0.1))
+		def("ToggleOffBgOff", t.ToggleOffBg:Lerp(bg, 0.4))
+		def("ToggleOffDotOff", t.ToggleOffDot:Lerp(bg, 0.4))
+		def("TextGray", text:Lerp(bg, 0.37))
+		def("TextDim", text:Lerp(bg, 0.65))
+		def("ValueOff", text:Lerp(bg, 0.57))
+		def("NavGray", text:Lerp(bg, 0.28))
+		def("Divider", t.BarBg:Lerp(text, 0.08))
+		def("ScrollTrack", t.BarBg)
+		def("ScrollThumb", t.BoxBg)
+		def("ScrollHover", t.TileHover)
+		def("ScrollDrag", t.ScrollHover:Lerp(text, 0.05))
+		def("WmBg", bg)
+		def("WmStroke", t.WmBg:Lerp(text, 0.1))
+		def("WmDivider", t.WmBg:Lerp(text, 0.12))
+		def("WmText", text)
+		def("WmDetailIcon", text:Lerp(bg, 0.2))
+	end
+	for k, v in pairs(base) do
+		if t[k] == nil then t[k] = v end
+	end
+	return t
+end
+
+local function AddTheme(name, tokens)
+	local t = DeriveTheme(type(tokens) == "table" and tokens or {})
 	if not Library.Themes[name] then
 		table.insert(Library.ThemeOrder, name)
 	end
@@ -1935,11 +1993,13 @@ local VKB_ROWS = {
 		{act = "space", w = 9.5, label = ""}, {act = "hide", w = 2.5, icon = {"keyboard-off", "chevron-down"}, label = "Hide"}),
 }
 
+-- Phones/tablets only; PC (and touch laptops with a keyboard) always keep the normal keyboard.
 local function UseVKeyboard()
 	local m = Library.CustomKeyboard
 	if m == false or m == "Off" then return false end
-	if m == true or m == "Always" then return true end
-	return UserInputService.TouchEnabled == true and UserInputService.KeyboardEnabled ~= true
+	return UserInputService.TouchEnabled == true
+		and UserInputService.KeyboardEnabled ~= true
+		and UserInputService.MouseEnabled ~= true
 end
 
 local function RichEscape(s)
@@ -2003,6 +2063,14 @@ function VKB.Build()
 	})
 
 	VKB.Gui, VKB.Root, VKB.Scaler, VKB.Panel = gui, root, scaler, panel
+	-- Screen rotation / resize: refit and keep it on screen.
+	gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+		if not (VKB.Target and VKB.Pos) or gui.AbsoluteSize.X < 1 then return end
+		VKB.Fit = VKB.ComputeFit(gui.AbsoluteSize)
+		StopTweens(scaler)
+		scaler.Scale = VKB.Fit
+		VKB.Place(VKB.Pos.X, VKB.Pos.Y)
+	end)
 	VKB.Stroke, VKB.Grip, VKB.Field, VKB.FieldStroke, VKB.Preview = stroke, grip, field, fieldStroke, preview
 	VKB.Keys = {}
 
@@ -2070,9 +2138,18 @@ function VKB.Build()
 	end)
 end
 
+function VKB.Viewport()
+	local vp = VKB.Gui.AbsoluteSize
+	if vp.X < 1 then vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600) end
+	return vp
+end
+function VKB.ComputeFit(vp)
+	return math.max(0.5, math.min(1, (vp.X - 16) / VKB_W, (vp.Y * 0.6) / VKB_H)) * (tonumber(Library.KeyboardScale) or 1)
+end
+
 -- Keeps the keyboard fully on screen; position is the panel centre.
 function VKB.Place(x, y)
-	local vp = VKB.Gui.AbsoluteSize
+	local vp = VKB.Viewport()
 	local hw, hh = VKB_W * VKB.Fit / 2, VKB_H * VKB.Fit / 2
 	x = math.clamp(x, hw, math.max(hw, vp.X - hw))
 	y = math.clamp(y, hh, math.max(hh, vp.Y - hh))
@@ -2271,9 +2348,8 @@ function VKB.Open(box, opts)
 	VKB.Held = {}
 	for _, k in ipairs(VKB.Keys) do k.down, k.tok = nil, (k.tok or 0) + 1 end
 
-	local vp = VKB.Gui.AbsoluteSize
-	if vp.X < 1 then vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600) end
-	VKB.Fit = math.max(0.5, math.min(1, (vp.X - 16) / VKB_W, (vp.Y * 0.6) / VKB_H)) * (tonumber(Library.KeyboardScale) or 1)
+	local vp = VKB.Viewport()
+	VKB.Fit = VKB.ComputeFit(vp)
 	if VKB.Pos then
 		VKB.Place(VKB.Pos.X, VKB.Pos.Y)
 	else
@@ -4146,7 +4222,7 @@ local function NewPage(W, full)
 		local T = W.Theme
 		local c = dragging and T.ScrollDrag or (hovering and T.ScrollHover or T.ScrollThumb)
 		if instant then
-			thumb.BackgroundColor3 = c
+			SetProps(thumb, {BackgroundColor3 = c})
 		else
 			Tween(thumb, TweenInfo.new(0.12, Enum.EasingStyle.Quad), {BackgroundColor3 = c})
 		end
@@ -6235,6 +6311,7 @@ local function CreateWindow(o)
 		Alive = true,
 		Title = o.Title or "Zenin",
 		ThemeName = themeName,
+		RequestedTheme = o.Theme,
 		Theme = Library.Themes[themeName],
 		Accent = ToColor(o.Accent) or rgb(255, 89, 89),
 		AccentAlpha = ToAlpha(o.AccentAlpha) or 1,
@@ -6267,6 +6344,10 @@ local function CreateWindow(o)
 		for _, e in ipairs(W.Listeners) do
 			local ok, err = pcall(e.fn, W.Theme, W.Accent, W.AccentAlpha)
 			if not ok then warn("[Zenin] theme listener error: " .. tostring(err)) end
+		end
+		if VKB.Target and VKB.Opts and VKB.Opts.theme == W then
+			VKB.Paint()
+			VKB.Render()
 		end
 	end
 	function W.Paint(obj, prop, key)
@@ -6706,8 +6787,14 @@ local function CreateWindow(o)
 	end)
 	Window.Unload = Window.Destroy
 
-	W.ThemeHook = function()
-		if W.Alive and W.ThemeDropdown then W.ThemeDropdown.SetOptions(CopyList(Library.ThemeOrder), true) end
+	-- Also re-applies a theme that is replaced while active, or one passed as Theme = "..." to
+	-- CreateWindow before it was added with AddTheme.
+	W.ThemeHook = function(name)
+		if not W.Alive then return end
+		if W.ThemeDropdown then W.ThemeDropdown.SetOptions(CopyList(Library.ThemeOrder), true) end
+		if name and (name == W.ThemeName or (name == W.RequestedTheme and W.ThemeName ~= name)) then
+			W.SetTheme(name)
+		end
 	end
 	table.insert(ThemeHooks, W.ThemeHook)
 	if o.Configs then Window.EnableConfigs(type(o.Configs) == "table" and o.Configs or nil) end
