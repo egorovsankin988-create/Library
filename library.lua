@@ -2011,6 +2011,24 @@ end
 
 local VKB = {Covers = setmetatable({}, {__mode = "k"})}
 
+local function InputLive(input)
+	local st = input.UserInputState
+	return st == Enum.UserInputState.Begin or st == Enum.UserInputState.Change
+end
+local function Inside(gui, pos)
+	local p, sz = gui.AbsolutePosition, gui.AbsoluteSize
+	return pos.X >= p.X and pos.X <= p.X + sz.X and pos.Y >= p.Y and pos.Y <= p.Y + sz.Y
+end
+local function MouseOnly(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1
+end
+-- Screen position in the keyboard's (IgnoreGuiInset) space. Touch positions exclude the top inset.
+local function PointerPos(input)
+	if MouseOnly(input) then return UserInputService:GetMouseLocation() end
+	local ok, inset = pcall(function() return game:GetService("GuiService"):GetGuiInset() end)
+	local p = Vector2.new(input.Position.X, input.Position.Y)
+	return ok and p + inset or p
+end
 function VKB.Build()
 	if VKB.Keys then return end
 	local gui = Create("ScreenGui", {
@@ -2111,31 +2129,54 @@ function VKB.Build()
 	end
 
 	VKB.Held = {}
-	UserInputService.InputEnded:Connect(function(input)
-		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-		local k = VKB.Held[id]
-		if k then
-			VKB.Held[id] = nil
-			VKB.Release(k)
-		end
-		if VKB.Drag and VKB.Drag.id == id then VKB.Drag = nil end
-	end)
-
 	head.InputBegan:Connect(function(input)
 		if not IsClickOrTouch(input) then return end
-		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-		VKB.Drag = {id = id, from = Vector2.new(input.Position.X, input.Position.Y), start = root.Position}
+		VKB.Drag = {input = input, from = PointerPos(input), start = root.Position}
+		VKB.Track()
 	end)
-	UserInputService.InputChanged:Connect(function(input)
-		local d = VKB.Drag
-		if not d then return end
-		local isTouch = input.UserInputType == Enum.UserInputType.Touch
-		if (isTouch and input ~= d.id) or (not isTouch and (input.UserInputType ~= Enum.UserInputType.MouseMovement or d.id ~= Enum.UserInputType.MouseButton1)) then
-			return
+end
+
+-- Roblox does not reliably fire InputEnded for a finger that slid around before lifting, which
+-- left keys stuck. While anything is held, poll each InputObject's own state instead: a key is
+-- released when its touch ends/cancels or the finger slides off it.
+function VKB.Step()
+	for input, k in pairs(VKB.Held) do
+		local live = InputLive(input)
+		if live and MouseOnly(input) then live = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+		if not live or not Inside(k.btn, PointerPos(input)) then
+			VKB.Held[input] = nil
+			VKB.Release(k)
 		end
-		local delta = Vector2.new(input.Position.X, input.Position.Y) - d.from
-		VKB.Place(d.start.X.Offset + delta.X, d.start.Y.Offset + delta.Y)
-	end)
+	end
+	local d = VKB.Drag
+	if d then
+		local live = InputLive(d.input)
+		if live and MouseOnly(d.input) then live = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+		if not live then
+			VKB.Drag = nil
+		else
+			local delta = PointerPos(d.input) - d.from
+			VKB.Place(d.start.X.Offset + delta.X, d.start.Y.Offset + delta.Y)
+		end
+	end
+	if not d and next(VKB.Held) == nil and VKB.Tracker then
+		VKB.Tracker:Disconnect()
+		VKB.Tracker = nil
+	end
+end
+function VKB.Track()
+	if not VKB.Tracker then VKB.Tracker = RunService.RenderStepped:Connect(VKB.Step) end
+end
+function VKB.ReleaseAll()
+	for input, k in pairs(VKB.Held or {}) do
+		VKB.Held[input] = nil
+		VKB.Release(k)
+	end
+	VKB.Drag = nil
+	for _, k in ipairs(VKB.Keys or {}) do
+		k.down, k.tok = nil, (k.tok or 0) + 1
+		VKB.PaintKey(k)
+	end
 end
 
 function VKB.Viewport()
@@ -2279,11 +2320,11 @@ end
 
 local VKB_REPEAT = {back = true, left = true, right = true}
 function VKB.Press(k, input)
-	if not VKB.Target then return end
-	local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-	VKB.Held[id] = k
+	if not VKB.Target or VKB.Held[input] then return end
+	VKB.Held[input] = k
 	k.down = (k.down or 0) + 1
 	k.tok = (k.tok or 0) + 1
+	VKB.Track()
 	VKB.PaintKey(k)
 	VKB.Act(k)
 	if VKB_REPEAT[k.spec.act] then
@@ -2337,7 +2378,10 @@ function VKB.Open(box, opts)
 	VKB.Build()
 	local sg = box:FindFirstAncestorWhichIsA("ScreenGui")
 	if not sg then return end
-	VKB.Gui.Parent = sg.Parent
+	if VKB.Gui.Parent ~= sg.Parent then
+		VKB.Purge(sg.Parent)
+		VKB.Gui.Parent = sg.Parent
+	end
 	VKB.Gui.DisplayOrder = sg.DisplayOrder + 50
 	VKB.Target, VKB.Opts = box, opts
 	VKB.Shift = false
@@ -2345,8 +2389,7 @@ function VKB.Open(box, opts)
 	if box.ClearTextOnFocus then box.Text = "" end
 	VKB.Text = box.Text
 	VKB.Cursor = #VKB.Text
-	VKB.Held = {}
-	for _, k in ipairs(VKB.Keys) do k.down, k.tok = nil, (k.tok or 0) + 1 end
+	VKB.ReleaseAll()
 
 	local vp = VKB.Viewport()
 	VKB.Fit = VKB.ComputeFit(vp)
@@ -2367,6 +2410,23 @@ function VKB.Open(box, opts)
 	end)
 end
 
+-- Keyboards left over from an earlier execution of the script would otherwise stay on screen.
+function VKB.Purge(parent)
+	if not parent then return end
+	for _, c in ipairs(parent:GetChildren()) do
+		if c.Name == "ZeninKeyboard" and c ~= VKB.Gui then pcall(function() c:Destroy() end) end
+	end
+end
+
+-- Fully removes the keyboard (window unload); it is rebuilt on next use.
+function VKB.Destroy()
+	if VKB.Target then VKB.Close(false, true) end
+	if VKB.Tracker then VKB.Tracker:Disconnect() VKB.Tracker = nil end
+	if VKB.Gui then pcall(function() VKB.Gui:Destroy() end) end
+	VKB.Gui, VKB.Root, VKB.Keys, VKB.Shown, VKB.Drag = nil, nil, nil, nil, nil
+	VKB.Held = {}
+end
+
 -- switching: another box is about to open, so skip the hide animation.
 function VKB.Close(enter, switching)
 	local box, opts = VKB.Target, VKB.Opts
@@ -2376,6 +2436,7 @@ function VKB.Close(enter, switching)
 		VKB.Watch:Disconnect()
 		VKB.Watch = nil
 	end
+	VKB.ReleaseAll()
 	if not switching then VKB.Show(false) end
 	if opts and opts.onBlur then SafeCall(opts.onBlur, enter and true or false) end
 end
@@ -6525,6 +6586,7 @@ local function CreateWindow(o)
 	local guiName = o.GuiName or Library.GuiName
 	local old = parent:FindFirstChild(guiName)
 	if old then old:Destroy() end
+	VKB.Purge(parent)
 	W.Gui = Create("ScreenGui", {
 		Name = guiName,
 		ResetOnSpawn = false,
@@ -6777,6 +6839,7 @@ local function CreateWindow(o)
 			end
 		end
 		for _, fn in ipairs(W.UnloadCallbacks) do SafeCall(fn) end
+		VKB.Destroy()
 		W.Gui:Destroy()
 		W.Listeners = {}
 		for _, t in ipairs({W.Elements, W.Pages, W.Tabs, W.HeaderButtons, W.AccentIcons, W.UnloadCallbacks, W.Popups, W.LogoHooks}) do
