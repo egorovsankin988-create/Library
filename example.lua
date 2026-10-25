@@ -15,7 +15,6 @@ local Window = Library:CreateWindow({
 	KeybindList = {
 		Visible = true,
 		ShowInactive = true,   -- false = only show binds that are currently on
-		Collapsed = false,     -- start collapsed; click the header or chevron to expand/collapse (animated)
 		-- Position = UDim2.fromOffset(8, 42),
 	},
 	Watermark = {
@@ -170,6 +169,9 @@ Inputs:AddTextbox({
 
 Inputs:AddDivider("Keybinds")
 
+-- Keybinds: click the key to rebind (supports Ctrl/Shift/Alt combos, Esc cancels,
+-- Backspace clears), click the small "toggle"/"hold" chip to switch mode, right-click the key
+-- for a menu (mode, change, clear, reset). On phones, tap the key to use the bind.
 Inputs:AddKeybind({
 	Name = "Fly (toggle)",
 	Flag = "FlyKey",
@@ -187,6 +189,16 @@ Inputs:AddKeybind({
 })
 
 Inputs:AddKeybind({
+	Name = "Teleport (combo)",
+	Flag = "TeleportKey",
+	Default = "Ctrl+T",          -- also accepts {Key = "T", Mods = {"Ctrl"}}
+	Mode = "Press",
+	NoDuplicates = true,          -- refuse keys already used by another keybind
+	Blacklist = {"W", "A", "S", "D", "Space"},
+	Callback = function() print("Teleport!") end,
+})
+
+Inputs:AddKeybind({
 	Name = "Hidden from list",
 	Flag = "SecretKey",
 	Default = Enum.KeyCode.K,
@@ -199,7 +211,7 @@ Inputs:AddKeybind({
 	Default = "P",
 	Mode = "Press",
 	Callback = function() Window:Hide() end,
-	ChangedCallback = function(key) print("Panic key is now", key and key.Name or "None") end,
+	ChangedCallback = function(key, mods) print("Panic key is now", key and key.Name or "None") end,
 })
 
 local Colors = Misc:AddSection({Name = "Colors", Side = "Right"})
