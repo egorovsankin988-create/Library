@@ -2155,8 +2155,9 @@ end
 
 local MODE_TEXT = {Toggle = "toggle", Hold = "hold", Press = "press"}
 local ROW_TI = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-local LIST_TI_IN = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
-local LIST_TI_OUT = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+-- Same feel as the main window open/close.
+local LIST_TI_IN = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local LIST_TI_OUT = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
 
 local function BuildKeybindList(W, cfg)
 	if cfg == false then cfg = {Visible = false} end
@@ -2206,7 +2207,6 @@ local function BuildKeybindList(W, cfg)
 	Corner(badge, 7)
 	Create("UIPadding", {PaddingLeft = UDim.new(0, 5), PaddingRight = UDim.new(0, 5), Parent = badge})
 	local count = Label(badge, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10, Weight = "SemiBold"})
-	local badgeScale = Create("UIScale", {Parent = badge})
 	local collapse = Create("TextButton", {
 		Size = UDim2.fromOffset(24, 24),
 		Position = UDim2.new(1, -27, 0.5, -12),
@@ -2288,7 +2288,6 @@ local function BuildKeybindList(W, cfg)
 		end)
 	end
 
-	local lastCount = -1
 	function L.Refresh(instant)
 		if not W.Alive then return end
 		local animate = not instant and shown
@@ -2309,8 +2308,6 @@ local function BuildKeybindList(W, cfg)
 		ShowRow(emptyRow, visibleCount == 0 and not L.Collapsed, animate, ROW_H)
 		count.Text = tostring(visibleCount)
 		badge.Visible = visibleCount > 0
-		if visibleCount ~= lastCount and lastCount >= 0 and animate and visibleCount > 0 then Pulse(badgeScale, 1.2) end
-		lastCount = visibleCount
 		Anim(chev, {Rotation = L.Collapsed and 180 or 0}, animate, ROW_TI)
 		local any = false
 		for _, e in ipairs(L.Entries) do
@@ -2375,7 +2372,6 @@ local function BuildKeybindList(W, cfg)
 		e.pill = Create("Frame", {Size = UDim2.new(0, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.X, BorderSizePixel = 0, LayoutOrder = 2, Parent = right})
 		Corner(e.pill, 3)
 		e.pillStroke = Stroke(e.pill, WHITE, 1)
-		e.pillScale = Create("UIScale", {Parent = e.pill})
 		Create("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = e.pill})
 		e.key = Label(e.pill, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10, Weight = "SemiBold"})
 		e.conn = BindPress(W, btn, function()
@@ -2417,15 +2413,11 @@ local function BuildKeybindList(W, cfg)
 	end
 	function L.Pulse(e)
 		e.pulse = true
-		if e.pillScale then Pulse(e.pillScale, 1.15) end
 		L.Refresh()
 		task.delay(0.3, function()
 			e.pulse = nil
 			if W.Alive then L.Refresh() end
 		end)
-	end
-	function L.Flash(e)
-		if e.pillScale and shown then Pulse(e.pillScale, 1.12) end
 	end
 
 	local api = {}
@@ -2499,7 +2491,6 @@ local function AddKeybind(W, S, o)
 	})
 	Corner(btn, 4)
 	local bs = Stroke(btn, WHITE, 1)
-	local btnScale = Create("UIScale", {Parent = btn})
 	local timer = Create("Frame", {
 		AnchorPoint = Vector2.new(0, 1),
 		Position = UDim2.fromScale(0, 1),
@@ -2509,7 +2500,7 @@ local function AddKeybind(W, S, o)
 		Parent = btn,
 	})
 
-	local chip, chipLbl, chipStroke, chipScale
+	local chip, chipLbl, chipStroke
 	if showModeChip then
 		chip = Create("TextButton", {
 			AnchorPoint = Vector2.new(1, 0.5),
@@ -2523,7 +2514,6 @@ local function AddKeybind(W, S, o)
 		})
 		Corner(chip, 9)
 		chipStroke = Stroke(chip, WHITE, 1)
-		chipScale = Create("UIScale", {Parent = chip})
 		chipLbl = Label(chip, "", {Size = UDim2.fromScale(1, 1), TextSize = 10, Align = Enum.TextXAlignment.Center})
 		chipLbl.ZIndex = 3
 	end
@@ -2612,7 +2602,6 @@ local function AddKeybind(W, S, o)
 		Paint(true)
 	end
 	local function Reject(msg)
-		Shake(btn, btnBase)
 		local T = W.Theme
 		SetProps(bs, {Color = rgb(235, 87, 87), Transparency = 0})
 		task.delay(0.35, function()
@@ -2644,7 +2633,6 @@ local function AddKeybind(W, S, o)
 		el._sync(k)
 		ListRefresh()
 		if JoinBind(key, mods) ~= before then
-			Pulse(btnScale, 1.1)
 			if not silent then SafeCall(o.ChangedCallback, k, mods) end
 		end
 	end
@@ -2670,7 +2658,6 @@ local function AddKeybind(W, S, o)
 		Paint(true)
 		Layout(true)
 		ListRefresh()
-		if b then Pulse(btnScale, 1.08) end
 		SafeCall(o.Callback, active)
 		SafeCall(o.ToggleCallback, active)
 	end
@@ -2685,7 +2672,6 @@ local function AddKeybind(W, S, o)
 		elseif mode == "Hold" then
 			SetActive(down)
 		elseif down then
-			Pulse(btnScale, 1.12)
 			if entry and W.KBList then W.KBList.Pulse(entry) end
 			SafeCall(o.Callback, true)
 		end
@@ -2703,7 +2689,6 @@ local function AddKeybind(W, S, o)
 		Layout(true)
 		Paint(true)
 		SetProps(bs, {Color = W.Accent, Transparency = 0})
-		Tween(bs, TweenInfo.new(0.55, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true), {Transparency = 0.65})
 		local timeout = math.max(tonumber(o.PickTimeout) or 6, 1)
 		timer.Size = UDim2.new(1, 0, 0, 2)
 		Tween(timer, TweenInfo.new(timeout, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 0, 2)})
@@ -2727,7 +2712,6 @@ local function AddKeybind(W, S, o)
 		if m == mode then return end
 		if active then SetActive(false) end
 		mode = m
-		if chipScale and animate ~= false then Pulse(chipScale, 1.12) end
 		Layout(animate ~= false)
 		Paint(animate ~= false)
 		ListRefresh()
