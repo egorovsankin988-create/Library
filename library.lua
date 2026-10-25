@@ -39,6 +39,198 @@ local function SafeCall(fn, ...)
 	return res
 end
 
+-- Maid: owns cleanup tasks and releases them all at once, newest first.
+-- Accepted tasks: RBXScriptConnection, Instance, thread, Tween, function, a Maid, or any table
+-- with Destroy/Disconnect/Cancel. Named slots (maid.Name = task) replace and clean the old task.
+local Maid = {}
+Maid.__index = function(self, k)
+	local m = Maid[k]
+	if m ~= nil then return m end
+	local named = rawget(self, "_named")
+	return named and named[k]
+end
+Maid.__newindex = function(self, k, job)
+	if Maid[k] ~= nil then error("[Zenin] Maid: '" .. tostring(k) .. "' is reserved", 2) end
+	local named = rawget(self, "_named")
+	local old = named[k]
+	if old == job then return end
+	named[k] = job
+	if job ~= nil and rawget(self, "_dead") then
+		named[k] = nil
+		Maid.CleanTask(job)
+		return
+	end
+	if old ~= nil then Maid.CleanTask(old) end
+end
+
+function Maid.new()
+	return setmetatable({_tasks = {}, _named = {}, _dead = false, _cleaning = false}, Maid)
+end
+
+function Maid.Is(v)
+	return type(v) == "table" and getmetatable(v) == Maid
+end
+
+function Maid.CleanTask(job)
+	local kind = typeof(job)
+	local ok, err = pcall(function()
+		if kind == "RBXScriptConnection" then
+			job:Disconnect()
+		elseif kind == "Instance" then
+			if job:IsA("Tween") then job:Cancel() end
+			job:Destroy()
+		elseif kind == "thread" then
+			-- A thread can't cancel itself; one that is running ends through its own guards.
+			if coroutine.status(job) == "suspended" then task.cancel(job) end
+		elseif kind == "function" then
+			job()
+		elseif kind == "table" then
+			if Maid.Is(job) then
+				job:Destroy()
+			elseif type(job.Destroy) == "function" then
+				job:Destroy()
+			elseif type(job.Disconnect) == "function" then
+				job:Disconnect()
+			elseif type(job.Cancel) == "function" then
+				job:Cancel()
+			end
+		end
+	end)
+	if not ok then warn("[Zenin] cleanup error: " .. tostring(err)) end
+end
+
+-- Returns the task so it can be written inline: local c = maid:Give(sig:Connect(fn)).
+function Maid:Give(job)
+	if job == nil then return nil end
+	if self._dead then
+		Maid.CleanTask(job)
+		return job
+	end
+	table.insert(self._tasks, job)
+	if Maid.Is(job) then rawset(job, "_parent", self) end
+	return job
+end
+Maid.GiveTask = Maid.Give
+Maid.Add = Maid.Give
+
+function Maid:Connect(signal, fn)
+	return self:Give(signal:Connect(fn))
+end
+
+-- Runs fn on a thread owned by the maid: cancelled if the maid is cleaned first, and dropped
+-- from the maid once it finishes, so repeated spawns don't pile up.
+local function Owned(self, start, fn, ...)
+	local done, thread = false, nil
+	thread = start(function(...)
+		local ok, err = pcall(fn, ...)
+		if not ok then warn("[Zenin] task error: " .. tostring(err)) end
+		done = true
+		if thread then self:Remove(thread, true) end
+	end, ...)
+	if not done then self:Give(thread) end
+	return thread
+end
+
+function Maid:Spawn(fn, ...)
+	return Owned(self, task.spawn, fn, ...)
+end
+
+-- Runs fn after t seconds unless the maid is cleaned first.
+function Maid:Delay(t, fn, ...)
+	return Owned(self, function(f, ...) return task.delay(t, f, ...) end, fn, ...)
+end
+
+-- A sub-maid that is cleaned with this one, and detaches itself when destroyed on its own.
+function Maid:Child()
+	return self:Give(Maid.new())
+end
+
+-- Stops tracking a task; cleans it too unless keep is true.
+function Maid:Remove(job, keep)
+	for i = #self._tasks, 1, -1 do
+		if self._tasks[i] == job then
+			table.remove(self._tasks, i)
+			if Maid.Is(job) then rawset(job, "_parent", nil) end
+			if not keep then Maid.CleanTask(job) end
+			return true
+		end
+	end
+	for k, v in pairs(self._named) do
+		if v == job then
+			self._named[k] = nil
+			if not keep then Maid.CleanTask(job) end
+			return true
+		end
+	end
+	return false
+end
+
+function Maid:Has(job)
+	if table.find(self._tasks, job) then return true end
+	for _, v in pairs(self._named) do
+		if v == job then return true end
+	end
+	return false
+end
+
+-- Number of tasks; deep also counts tasks inside child maids.
+function Maid:Count(deep)
+	local n = 0
+	for _, t in ipairs(self._tasks) do
+		n = n + 1
+		if deep and Maid.Is(t) then n = n + t:Count(true) end
+	end
+	for _, t in pairs(self._named) do
+		n = n + 1
+		if deep and Maid.Is(t) then n = n + t:Count(true) end
+	end
+	return n
+end
+
+-- Cleans every task, newest first. Tasks given while cleaning are cleaned in the same pass.
+-- The maid stays usable afterwards.
+function Maid:Clean()
+	if self._cleaning then return end
+	self._cleaning = true
+	local named = self._named
+	for k, t in pairs(named) do
+		named[k] = nil
+		Maid.CleanTask(t)
+	end
+	local tasks = self._tasks
+	while #tasks > 0 do
+		local t = table.remove(tasks)
+		if Maid.Is(t) then rawset(t, "_parent", nil) end
+		Maid.CleanTask(t)
+	end
+	self._cleaning = false
+end
+Maid.DoCleaning = Maid.Clean
+
+-- Cleans and retires the maid: anything given afterwards is cleaned immediately.
+function Maid:Destroy()
+	if self._dead then return end
+	self._dead = true
+	local parent = rawget(self, "_parent")
+	if parent then
+		rawset(self, "_parent", nil)
+		parent:Remove(self, true)
+	end
+	self:Clean()
+end
+
+function Maid:IsAlive()
+	return not self._dead
+end
+
+Library.Maid = Maid
+Library.Windows = {}
+
+-- Shared across executions (getgenv when available) so a re-run can unload the old window.
+local SharedEnv = (type(getgenv) == "function" and getgenv()) or shared
+SharedEnv.__ZeninLiveWindows = SharedEnv.__ZeninLiveWindows or {}
+local LiveWindows = SharedEnv.__ZeninLiveWindows
+
 local function Opts(o)
 	if type(o) == "string" then return {Name = o} end
 	return o or {}
@@ -712,10 +904,13 @@ local function NewElement(W, S, kind, o, height)
 		end
 		el._depOn = nil
 		table.clear(el._deps)
+		el.Maid:Destroy()
 		row:Destroy()
 		W.Prune()
 	end)
 
+	el.Maid = W.Maid:Child()
+	Method(el, "GiveTask", function(job) return el.Maid:Give(job) end)
 	if el.Flag then Library.Options[el.Flag] = el end
 	table.insert(W.Elements, el)
 	return el, row
@@ -2011,6 +2206,24 @@ end
 
 local VKB = {Covers = setmetatable({}, {__mode = "k"})}
 
+local function InputLive(input)
+	local st = input.UserInputState
+	return st == Enum.UserInputState.Begin or st == Enum.UserInputState.Change
+end
+local function Inside(gui, pos)
+	local p, sz = gui.AbsolutePosition, gui.AbsoluteSize
+	return pos.X >= p.X and pos.X <= p.X + sz.X and pos.Y >= p.Y and pos.Y <= p.Y + sz.Y
+end
+local function MouseOnly(input)
+	return input.UserInputType == Enum.UserInputType.MouseButton1
+end
+-- Screen position in the keyboard's (IgnoreGuiInset) space. Touch positions exclude the top inset.
+local function PointerPos(input)
+	if MouseOnly(input) then return UserInputService:GetMouseLocation() end
+	local ok, inset = pcall(function() return game:GetService("GuiService"):GetGuiInset() end)
+	local p = Vector2.new(input.Position.X, input.Position.Y)
+	return ok and p + inset or p
+end
 function VKB.Build()
 	if VKB.Keys then return end
 	local gui = Create("ScreenGui", {
@@ -2111,31 +2324,54 @@ function VKB.Build()
 	end
 
 	VKB.Held = {}
-	UserInputService.InputEnded:Connect(function(input)
-		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-		local k = VKB.Held[id]
-		if k then
-			VKB.Held[id] = nil
-			VKB.Release(k)
-		end
-		if VKB.Drag and VKB.Drag.id == id then VKB.Drag = nil end
-	end)
-
 	head.InputBegan:Connect(function(input)
 		if not IsClickOrTouch(input) then return end
-		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-		VKB.Drag = {id = id, from = Vector2.new(input.Position.X, input.Position.Y), start = root.Position}
+		VKB.Drag = {input = input, from = PointerPos(input), start = root.Position}
+		VKB.Track()
 	end)
-	UserInputService.InputChanged:Connect(function(input)
-		local d = VKB.Drag
-		if not d then return end
-		local isTouch = input.UserInputType == Enum.UserInputType.Touch
-		if (isTouch and input ~= d.id) or (not isTouch and (input.UserInputType ~= Enum.UserInputType.MouseMovement or d.id ~= Enum.UserInputType.MouseButton1)) then
-			return
+end
+
+-- Roblox does not reliably fire InputEnded for a finger that slid around before lifting, which
+-- left keys stuck. While anything is held, poll each InputObject's own state instead: a key is
+-- released when its touch ends/cancels or the finger slides off it.
+function VKB.Step()
+	for input, k in pairs(VKB.Held) do
+		local live = InputLive(input)
+		if live and MouseOnly(input) then live = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+		if not live or not Inside(k.btn, PointerPos(input)) then
+			VKB.Held[input] = nil
+			VKB.Release(k)
 		end
-		local delta = Vector2.new(input.Position.X, input.Position.Y) - d.from
-		VKB.Place(d.start.X.Offset + delta.X, d.start.Y.Offset + delta.Y)
-	end)
+	end
+	local d = VKB.Drag
+	if d then
+		local live = InputLive(d.input)
+		if live and MouseOnly(d.input) then live = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1) end
+		if not live then
+			VKB.Drag = nil
+		else
+			local delta = PointerPos(d.input) - d.from
+			VKB.Place(d.start.X.Offset + delta.X, d.start.Y.Offset + delta.Y)
+		end
+	end
+	if not d and next(VKB.Held) == nil and VKB.Tracker then
+		VKB.Tracker:Disconnect()
+		VKB.Tracker = nil
+	end
+end
+function VKB.Track()
+	if not VKB.Tracker then VKB.Tracker = RunService.RenderStepped:Connect(VKB.Step) end
+end
+function VKB.ReleaseAll()
+	for input, k in pairs(VKB.Held or {}) do
+		VKB.Held[input] = nil
+		VKB.Release(k)
+	end
+	VKB.Drag = nil
+	for _, k in ipairs(VKB.Keys or {}) do
+		k.down, k.tok = nil, (k.tok or 0) + 1
+		VKB.PaintKey(k)
+	end
 end
 
 function VKB.Viewport()
@@ -2279,11 +2515,11 @@ end
 
 local VKB_REPEAT = {back = true, left = true, right = true}
 function VKB.Press(k, input)
-	if not VKB.Target then return end
-	local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
-	VKB.Held[id] = k
+	if not VKB.Target or VKB.Held[input] then return end
+	VKB.Held[input] = k
 	k.down = (k.down or 0) + 1
 	k.tok = (k.tok or 0) + 1
+	VKB.Track()
 	VKB.PaintKey(k)
 	VKB.Act(k)
 	if VKB_REPEAT[k.spec.act] then
@@ -2337,7 +2573,10 @@ function VKB.Open(box, opts)
 	VKB.Build()
 	local sg = box:FindFirstAncestorWhichIsA("ScreenGui")
 	if not sg then return end
-	VKB.Gui.Parent = sg.Parent
+	if VKB.Gui.Parent ~= sg.Parent then
+		VKB.Purge(sg.Parent)
+		VKB.Gui.Parent = sg.Parent
+	end
 	VKB.Gui.DisplayOrder = sg.DisplayOrder + 50
 	VKB.Target, VKB.Opts = box, opts
 	VKB.Shift = false
@@ -2345,8 +2584,7 @@ function VKB.Open(box, opts)
 	if box.ClearTextOnFocus then box.Text = "" end
 	VKB.Text = box.Text
 	VKB.Cursor = #VKB.Text
-	VKB.Held = {}
-	for _, k in ipairs(VKB.Keys) do k.down, k.tok = nil, (k.tok or 0) + 1 end
+	VKB.ReleaseAll()
 
 	local vp = VKB.Viewport()
 	VKB.Fit = VKB.ComputeFit(vp)
@@ -2367,6 +2605,23 @@ function VKB.Open(box, opts)
 	end)
 end
 
+-- Keyboards left over from an earlier execution of the script would otherwise stay on screen.
+function VKB.Purge(parent)
+	if not parent then return end
+	for _, c in ipairs(parent:GetChildren()) do
+		if c.Name == "ZeninKeyboard" and c ~= VKB.Gui then pcall(function() c:Destroy() end) end
+	end
+end
+
+-- Fully removes the keyboard (window unload); it is rebuilt on next use.
+function VKB.Destroy()
+	if VKB.Target then VKB.Close(false, true) end
+	if VKB.Tracker then VKB.Tracker:Disconnect() VKB.Tracker = nil end
+	if VKB.Gui then pcall(function() VKB.Gui:Destroy() end) end
+	VKB.Gui, VKB.Root, VKB.Keys, VKB.Shown, VKB.Drag = nil, nil, nil, nil, nil
+	VKB.Held = {}
+end
+
 -- switching: another box is about to open, so skip the hide animation.
 function VKB.Close(enter, switching)
 	local box, opts = VKB.Target, VKB.Opts
@@ -2376,6 +2631,7 @@ function VKB.Close(enter, switching)
 		VKB.Watch:Disconnect()
 		VKB.Watch = nil
 	end
+	VKB.ReleaseAll()
 	if not switching then VKB.Show(false) end
 	if opts and opts.onBlur then SafeCall(opts.onBlur, enter and true or false) end
 end
@@ -2633,7 +2889,7 @@ end
 
 -- Press/release on a GUI object for mouse and touch. Release is tracked globally so a
 -- finger sliding off the object still ends a hold.
-local function BindPress(W, obj, onDown, onUp)
+local function BindPress(W, obj, onDown, onUp, maid)
 	local held
 	obj.InputBegan:Connect(function(input)
 		if held or not IsClickOrTouch(input) then return end
@@ -2652,7 +2908,7 @@ local function BindPress(W, obj, onDown, onUp)
 			held = nil
 			SafeCall(onUp)
 		end
-	end)
+	end, maid)
 end
 
 local PULSE_UP = TweenInfo.new(0.07, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -2920,7 +3176,7 @@ local function BuildKeybindList(W, cfg)
 	function L.Remove(e)
 		local i = IndexOf(L.Entries, e)
 		if i then table.remove(L.Entries, i) end
-		if e.conn then pcall(function() e.conn:Disconnect() end) end
+		if e.conn then W.Maid:Remove(e.conn) end
 		if e.btn then
 			local b = e.btn
 			if shown and b.Visible then
@@ -3213,7 +3469,7 @@ local function AddKeybind(W, S, o)
 		local timeout = math.max(tonumber(o.PickTimeout) or 6, 1)
 		timer.Size = UDim2.new(1, 0, 0, 2)
 		Tween(timer, TweenInfo.new(timeout, Enum.EasingStyle.Linear), {Size = UDim2.new(0, 0, 0, 2)})
-		task.spawn(function()
+		el.Maid:Spawn(function()
 			local started = os.clock()
 			while picking and pickTok == tok and row.Parent do
 				task.wait(0.3)
@@ -3320,10 +3576,9 @@ local function AddKeybind(W, S, o)
 
 	OnMouseEnter(btn, function() hover = true Paint(true) end)
 	btn.MouseLeave:Connect(function() hover = false pressedBtn = false Paint(true) end)
-	local touchConn
 	if touchTrigger then
 		-- Phones have no keys to bind, so tapping the key button runs the bind instead.
-		touchConn = BindPress(W, btn, function()
+		BindPress(W, btn, function()
 			pressedBtn = true
 			Paint(true)
 			Trigger(true)
@@ -3331,7 +3586,7 @@ local function AddKeybind(W, S, o)
 			pressedBtn = false
 			Paint(true)
 			Trigger(false)
-		end)
+		end, el.Maid)
 	else
 		btn.InputBegan:Connect(function(input)
 			if IsClickOrTouch(input) and el.Enabled and not picking then
@@ -3363,8 +3618,7 @@ local function AddKeybind(W, S, o)
 		end)
 	end
 
-	local conns = {}
-	table.insert(conns, W.Connect(UserInputService.InputBegan, function(input, gp)
+	W.Connect(UserInputService.InputBegan, function(input, gp)
 		if not row.Parent then return end
 		if picking then
 			local t = input.UserInputType
@@ -3402,8 +3656,8 @@ local function AddKeybind(W, S, o)
 			end
 		end
 		Trigger(true)
-	end))
-	table.insert(conns, W.Connect(UserInputService.InputEnded, function(input)
+	end, el.Maid)
+	W.Connect(UserInputService.InputEnded, function(input)
 		if not row.Parent then return end
 		if picking then
 			-- Releasing a lone modifier binds the modifier itself.
@@ -3419,11 +3673,11 @@ local function AddKeybind(W, S, o)
 		elseif HasMods(mods) and input.UserInputType == Enum.UserInputType.Keyboard and mods[MOD_GROUP[input.KeyCode.Name] or ""] then
 			SetActive(false)
 		end
-	end))
-	table.insert(conns, W.Connect(UserInputService.WindowFocusReleased, function()
+	end, el.Maid)
+	W.Connect(UserInputService.WindowFocusReleased, function()
 		if mode == "Hold" and active then SetActive(false) end
 		StopPicking()
-	end))
+	end, el.Maid)
 
 	function el._specific(input)
 		return el.Enabled and HasMods(mods) and KeyMatches(key, input) and ModsMatch(key, mods)
@@ -3489,13 +3743,15 @@ local function AddKeybind(W, S, o)
 		})
 	end
 
+	-- On unload a held Hold-bind would never see its key-up, so release it here.
+	el.Maid:Give(function()
+		StopPicking()
+		if active and mode == "Hold" then SetActive(false) end
+	end)
 	local baseDestroy = el.Destroy
 	Method(el, "Destroy", function()
 		StopPicking()
 		if active then SetActive(false) end
-		for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-		table.clear(conns)
-		if touchConn then pcall(function() touchConn:Disconnect() end) end
 		local i = IndexOf(W.Keybinds, el)
 		if i then table.remove(W.Keybinds, i) end
 		if entry and W.KBList then W.KBList.Remove(entry) end
@@ -4584,7 +4840,7 @@ local function BuildWatermark(W, cfg)
 		end
 	end
 	WM.UpdateDetails()
-	task.spawn(function()
+	W.Maid:Spawn(function()
 		while W.Alive do
 			WM.UpdateDetails()
 			task.wait(0.25)
@@ -6288,6 +6544,14 @@ end
 
 local function CreateWindow(o)
 	o = Opts(o)
+	local guiKey = o.GuiName or Library.GuiName
+	-- Re-running the script: fully unload the previous window (connections, loops, keybinds),
+	-- not just its ScreenGui, even if it came from an older copy of the library.
+	local prev = LiveWindows[guiKey]
+	if prev then
+		LiveWindows[guiKey] = nil
+		pcall(prev)
+	end
 	if o.CustomKeyboard ~= nil then Library.SetCustomKeyboard(o.CustomKeyboard) end
 	if o.Name and not o.Title then o.Title = o.Name end
 	-- Runs before any window or API exists, so nothing below is reachable until a key passes.
@@ -6315,7 +6579,8 @@ local function CreateWindow(o)
 		Theme = Library.Themes[themeName],
 		Accent = ToColor(o.Accent) or rgb(255, 89, 89),
 		AccentAlpha = ToAlpha(o.AccentAlpha) or 1,
-		Listeners = {}, Conns = {}, Popups = {}, LogoHooks = {},
+		Maid = Maid.new(),
+		Listeners = {}, Popups = {}, LogoHooks = {},
 		Pages = {}, Tabs = {}, Elements = {}, HeaderButtons = {}, AccentIcons = {}, UnloadCallbacks = {},
 		BarW = math.clamp(math.floor(tonumber(o.ScrollbarSize) or 6), 3, 24),
 		WheelScroll = o.MouseWheel == true,
@@ -6358,10 +6623,9 @@ local function CreateWindow(o)
 			if not IndexOf(W.AccentIcons, ic) then ic.ImageColor3 = T.NavGray end
 		end, ic)
 	end
-	function W.Connect(signal, fn)
-		local c = signal:Connect(fn)
-		table.insert(W.Conns, c)
-		return c
+	-- maid: optional owner (e.g. an element's maid); defaults to the window's.
+	function W.Connect(signal, fn, maid)
+		return (maid or W.Maid):Give(signal:Connect(fn))
 	end
 	W.Drag = nil
 	local function Stale(d, input)
@@ -6522,9 +6786,10 @@ local function CreateWindow(o)
 		local ok, hui = pcall(function() return gethui and gethui() end)
 		parent = (ok and hui) or LocalPlayer:WaitForChild("PlayerGui")
 	end
-	local guiName = o.GuiName or Library.GuiName
+	local guiName = guiKey
 	local old = parent:FindFirstChild(guiName)
 	if old then old:Destroy() end
+	VKB.Purge(parent)
 	W.Gui = Create("ScreenGui", {
 		Name = guiName,
 		ResetOnSpawn = false,
@@ -6533,6 +6798,8 @@ local function CreateWindow(o)
 		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
 		Parent = parent,
 	})
+	-- First task, so it is cleaned last: everything else still has its UI while it cleans up.
+	W.Maid:Give(W.Gui)
 
 	W.WatermarkApi = BuildWatermark(W, o.Watermark)
 	W.KeybindListApi = BuildKeybindList(W, o.KeybindList)
@@ -6751,7 +7018,7 @@ local function CreateWindow(o)
 	Method(Window, "GetStats", function()
 		return {
 			Listeners = #W.Listeners,
-			Connections = #W.Conns,
+			Connections = W.Maid:Count(true),
 			Elements = #W.Elements,
 			Pages = #W.Pages,
 			Instances = W.Alive and #W.Gui:GetDescendants() or 0,
@@ -6759,25 +7026,31 @@ local function CreateWindow(o)
 	end)
 
 	Method(Window, "OnUnload", function(fn) table.insert(W.UnloadCallbacks, fn) end)
+	Method(Window, "GiveTask", function(job) return W.Maid:Give(job) end)
+	Method(Window, "Connect", function(signal, fn) return W.Connect(signal, fn) end)
 	Method(Window, "Destroy", function()
 		if not W.Alive then return end
 		W.Alive = false
+		if LiveWindows[guiKey] == Window.Destroy then LiveWindows[guiKey] = nil end
+		local wi = IndexOf(Library.Windows, Window)
+		if wi then table.remove(Library.Windows, wi) end
 		if W.KeyGui then pcall(function() W.KeyGui:Destroy() end) end
 		W.ClosePopup()
 		W.CancelDrag()
 		for _, p in ipairs(W.Pages) do p.StopScroll() end
-		for _, c in ipairs(W.Conns) do pcall(function() c:Disconnect() end) end
-		table.clear(W.Conns)
 		local hi = IndexOf(ThemeHooks, W.ThemeHook)
 		if hi then table.remove(ThemeHooks, hi) end
+		-- User callbacks run first, while the UI and element state still exist.
+		for _, fn in ipairs(W.UnloadCallbacks) do SafeCall(fn) end
 		for _, el in ipairs(W.Elements) do
-			if el.Flag then
+			if el.Flag and Library.Options[el.Flag] == el then
 				Library.Flags[el.Flag] = nil
 				Library.Options[el.Flag] = nil
 			end
 		end
-		for _, fn in ipairs(W.UnloadCallbacks) do SafeCall(fn) end
-		W.Gui:Destroy()
+		VKB.Destroy()
+		-- Connections, loops, element maids and user tasks, newest first; the ScreenGui last.
+		W.Maid:Destroy()
 		W.Listeners = {}
 		for _, t in ipairs({W.Elements, W.Pages, W.Tabs, W.HeaderButtons, W.AccentIcons, W.UnloadCallbacks, W.Popups, W.LogoHooks}) do
 			table.clear(t)
@@ -6833,7 +7106,7 @@ local function CreateWindow(o)
 			if W.KBList then W.KBList.Refresh() end
 			SafeCall(keyCfg.OnExpire, reason)
 			for _, fn in ipairs(expireHooks) do SafeCall(fn, reason) end
-			task.spawn(function()
+			W.Maid:Spawn(function()
 				local ctx2 = setmetatable({
 					Reason = reason,
 					SkipSaved = true,
@@ -6861,7 +7134,7 @@ local function CreateWindow(o)
 			if checking or not KS.Valid then return end
 			checking = true
 			local key = KS.Key
-			task.spawn(function()
+			W.Maid:Spawn(function()
 				local valid, msg, exp, definitive = backend.Check(key, KS.Activated)
 				checking = false
 				lastCheck = os.clock()
@@ -6900,7 +7173,7 @@ local function CreateWindow(o)
 			keyLbl.Set("Key: " .. masked .. "   ·   " .. state)
 		end
 
-		task.spawn(function()
+		W.Maid:Spawn(function()
 			while W.Alive do
 				if KS.Valid then
 					local left = KS.Expires and (KS.Expires - Now())
@@ -6936,6 +7209,8 @@ local function CreateWindow(o)
 	end
 
 	Library.ActiveWindow = Window
+	table.insert(Library.Windows, Window)
+	LiveWindows[guiKey] = Window.Destroy
 	return Window
 end
 
@@ -6949,7 +7224,9 @@ Method(Library, "Notify", function(o)
 	return nil
 end)
 Method(Library, "Unload", function()
+	for _, w in ipairs(CopyList(Library.Windows)) do w.Destroy() end
 	if Library.ActiveWindow then Library.ActiveWindow.Destroy() end
+	VKB.Destroy()
 end)
 
 return Library

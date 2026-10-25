@@ -393,4 +393,10 @@ Window:AddHeaderButton({
 
 Window:OnUnload(function() print("Zenin Demo unloaded") end)
 
+-- Anything given to the window is cleaned up on Unload, or automatically when the script is re-run.
+Window:GiveTask(game:GetService("Players").PlayerAdded:Connect(function(plr)
+	Notify(plr.Name .. " joined")
+end))
+-- Standalone maids for your own systems: Library.Maid.new(), :Give(), :Connect(), :Spawn(), :Delay(), :Child(), :Clean()
+
 Notify("Loaded! Press RightShift to toggle the menu.")
