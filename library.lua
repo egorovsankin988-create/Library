@@ -1937,102 +1937,259 @@ local function BuildKeybindList(W, cfg)
 	if touch == nil then touch = TouchOnly() end
 	local ROW_H = touch and 30 or 22
 	local LIST_W = touch and 210 or 186
+	local HEADER_H = touch and 30 or 26
+	local PAD_TOP, PAD_BOTTOM = 3, 5
 
-	local L = {Entries = {}, Wanted = cfg.Visible ~= false and cfg.Enabled ~= false, ShowInactive = cfg.ShowInactive ~= false, Collapsed = false}
+	local L = {
+		Entries = {},
+		Wanted = cfg.Visible ~= false and cfg.Enabled ~= false,
+		ShowInactive = cfg.ShowInactive ~= false,
+		Collapsed = cfg.Collapsed == true,
+	}
 	W.KBList = L
 
+	local KB_TI = TweenInfo.new(0.24, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	local KB_STATE_TI = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+	local KB_SHOW_TI = TweenInfo.new(0.22, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+	local KB_HIDE_TI = TweenInfo.new(0.16, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+	local KB_HIDDEN_SCALE = 0.94
+
+	-- Outer frame is the drag target; the panel is inset by 1px so its Border stroke
+	-- isn't clipped while it is wrapped in the CanvasGroup fader.
 	local frame = Create("Frame", {
 		Name = "KeybindList",
-		Size = UDim2.fromOffset(LIST_W, 0),
-		AutomaticSize = Enum.AutomaticSize.Y,
+		Size = UDim2.fromOffset(LIST_W + 2, HEADER_H + 2),
 		Position = cfg.Position or UDim2.fromOffset(8, 42),
-		BackgroundTransparency = 0.1,
+		BackgroundTransparency = 1,
 		BorderSizePixel = 0,
 		Active = true,
 		Visible = false,
 		Parent = W.Gui,
 	})
-	W.Paint(frame, "BackgroundColor3", "WmBg")
-	Corner(frame, 6)
-	local stroke = Stroke(frame, WHITE, 1, 0.15)
+	local pop = Create("UIScale", {Scale = 1, Parent = frame})
+	local panel = Create("Frame", {
+		Size = UDim2.new(1, -2, 1, -2),
+		Position = UDim2.fromOffset(1, 1),
+		BackgroundTransparency = 0.1,
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Parent = frame,
+	})
+	W.Paint(panel, "BackgroundColor3", "WmBg")
+	Corner(panel, 6)
+	local stroke = Stroke(panel, WHITE, 1, 0.15)
 	W.Paint(stroke, "Color", "WmStroke")
-	Create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = frame})
-	Create("UIPadding", {PaddingBottom = UDim.new(0, 4), Parent = frame})
+	-- Only used while showing/hiding so the whole panel fades as one layer.
+	local okFader, fader = pcall(Create, "CanvasGroup", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = frame,
+	})
+	if not okFader then fader = nil end
 
-	local header = Create("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Active = true, LayoutOrder = 0, Parent = frame})
+	local header = Create("Frame", {Size = UDim2.new(1, 0, 0, HEADER_H), BackgroundTransparency = 1, Active = true, Parent = panel})
 	local hIcon = CreateIcon(header, {"keyboard", "command"}, 12, UDim2.new(0, 10, 0.5, -6))
-	local title = Label(header, cfg.Title or "Keybinds", {Position = UDim2.fromOffset(28, 0), Size = UDim2.new(1, -80, 1, 0), Weight = "SemiBold", Truncate = true})
-	local count = Label(header, "", {Position = UDim2.new(1, -60, 0, 0), Size = UDim2.fromOffset(30, 26), TextSize = 10, Align = Enum.TextXAlignment.Right})
+	local title = Label(header, cfg.Title or "Keybinds", {Position = UDim2.fromOffset(28, 0), Size = UDim2.new(1, -104, 1, 0), Weight = "SemiBold", Truncate = true})
+	local badge = Create("Frame", {
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -32, 0.5, 0),
+		Size = UDim2.fromOffset(0, 16),
+		AutomaticSize = Enum.AutomaticSize.X,
+		BorderSizePixel = 0,
+		Parent = header,
+	})
+	Corner(badge, 8)
+	Create("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = badge})
+	local count = Label(badge, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10, Weight = "SemiBold"})
 	local collapse = Create("TextButton", {
 		Size = UDim2.fromOffset(24, 24),
-		Position = UDim2.new(1, -27, 0.5, -12),
+		Position = UDim2.new(1, -28, 0.5, -12),
 		BackgroundTransparency = 1,
 		Text = "",
 		AutoButtonColor = false,
 		Parent = header,
 	})
+	Corner(collapse, 4)
 	local chev = CreateIcon(collapse, {"chevron-up"}, 12, UDim2.new(0.5, -6, 0.5, -6))
-	local line = Create("Frame", {Size = UDim2.new(1, -16, 0, 1), Position = UDim2.new(0, 8, 1, -1), BorderSizePixel = 0, Parent = header})
-	MakeDraggable(W, header, frame)
+	local line = Create("Frame", {Size = UDim2.new(1, -16, 0, 1), Position = UDim2.new(0, 8, 0, HEADER_H), BorderSizePixel = 0, Parent = panel})
 
-	local body = Create("Frame", {Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 1, Parent = frame})
+	local function ToggleCollapsed() L.SetCollapsed(not L.Collapsed) end
+	-- Clicking the header (without dragging) also collapses, which is a bigger target on phones.
+	MakeDraggable(W, header, frame, {OnClick = ToggleCollapsed})
+
+	local body = Create("Frame", {
+		Size = UDim2.new(1, 0, 0, 0),
+		Position = UDim2.fromOffset(0, HEADER_H + 1),
+		AutomaticSize = Enum.AutomaticSize.Y,
+		BackgroundTransparency = 1,
+		Parent = panel,
+	})
 	Create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Parent = body})
-	Create("UIPadding", {PaddingTop = UDim.new(0, 3), Parent = body})
+	Create("UIPadding", {PaddingTop = UDim.new(0, PAD_TOP), Parent = body})
 	local empty = Label(body, touch and "No keybinds" or "No active keybinds", {Size = UDim2.new(1, 0, 0, ROW_H), TextSize = 10, Align = Enum.TextXAlignment.Center})
 	empty.LayoutOrder = 1e6
 
-	local function PaintEntry(e)
-		local T = W.Theme
-		local on = (e.isActive() or e.pulse == true) and true or false
-		e.bar.Visible = on
-		e.bar.BackgroundColor3 = W.Accent
-		e.bar.BackgroundTransparency = 1 - W.AccentAlpha
-		e.name.TextColor3 = not e.enabled() and T.TextDim or (on and T.Text or T.TextGray)
-		e.mode.TextColor3 = T.TextDim
-		e.pill.BackgroundColor3 = T.DropdownBg
-		e.pillStroke.Color = on and W.Accent or T.DropdownBorder
-		e.pillStroke.Transparency = on and (1 - W.AccentAlpha) or 0
-		e.key.TextColor3 = on and W.Accent or T.TextGray
-		e.row.BackgroundColor3 = T.PopupHover
+	local function Set(obj, instant, props)
+		if instant then
+			for k, v in pairs(props) do obj[k] = v end
+		else
+			Tween(obj, KB_STATE_TI, props)
+		end
 	end
 
+	local function PaintEntry(e, instant)
+		local T = W.Theme
+		local on = (e.isActive() or e.pulse == true) and true or false
+		local enabled = e.enabled() and true or false
+		local state = (on and "1" or "0") .. (enabled and "1" or "0") .. (e.hover and "1" or "0")
+		if not instant and e.state == state then return end
+		e.state = state
+		local accentT = 1 - W.AccentAlpha
+		Set(e.bar, instant, {
+			BackgroundColor3 = W.Accent,
+			BackgroundTransparency = on and accentT or 1,
+			Size = UDim2.new(0, 2, 0, on and ROW_H - 10 or 0),
+		})
+		Set(e.name, instant, {
+			TextColor3 = not enabled and T.TextDim or (on and T.Text or T.TextGray),
+			Position = UDim2.fromOffset(on and 14 or 12, 0),
+		})
+		Set(e.mode, instant, {TextColor3 = T.TextDim})
+		Set(e.pill, instant, {BackgroundColor3 = T.DropdownBg})
+		Set(e.pillStroke, instant, {
+			Color = on and W.Accent or T.DropdownBorder,
+			Transparency = on and accentT or 0,
+		})
+		Set(e.key, instant, {TextColor3 = on and W.Accent or T.TextGray})
+		Set(e.row, instant, {
+			BackgroundColor3 = T.PopupHover,
+			BackgroundTransparency = e.hover and 0.35 or (on and 0.7 or 1),
+		})
+	end
+
+	local function FadeInRow(e)
+		for _, t in ipairs({e.name, e.mode, e.key}) do
+			t.TextTransparency = 1
+			Tween(t, KB_TI, {TextTransparency = 0})
+		end
+	end
+
+	local shownTarget = false
+	local visToken = 0
+	local function Unwrap()
+		if fader then
+			panel.Parent = frame
+			fader.Visible = false
+			fader.GroupTransparency = 0
+		end
+	end
+	local function SetShown(show)
+		if show == shownTarget then return end
+		shownTarget = show
+		visToken = visToken + 1
+		local token = visToken
+		StopTweens(pop, fader)
+		if not W.Animate or (not show and not frame.Visible) then
+			Unwrap()
+			pop.Scale = 1
+			frame.Visible = show
+			return
+		end
+		local fresh = not frame.Visible
+		frame.Visible = true
+		if fader and panel.Parent ~= fader then
+			fader.GroupTransparency = fresh and 1 or 0
+			fader.Visible = true
+			panel.Parent = fader
+		end
+		if fresh then pop.Scale = KB_HIDDEN_SCALE end
+		local ti = show and KB_SHOW_TI or KB_HIDE_TI
+		local t = Tween(pop, ti, {Scale = show and 1 or KB_HIDDEN_SCALE})
+		if fader then Tween(fader, ti, {GroupTransparency = show and 0 or 1}) end
+		t.Completed:Connect(function()
+			if token ~= visToken or not W.Alive then return end
+			if not show then frame.Visible = false end
+			Unwrap()
+			pop.Scale = 1
+		end)
+	end
+
+	local currentH
+	local function Resize(shown, instant)
+		local h = HEADER_H
+		if not L.Collapsed then h = HEADER_H + 1 + PAD_TOP + math.max(shown, 1) * ROW_H + PAD_BOTTOM end
+		if h == currentH then return end
+		currentH = h
+		local size = UDim2.fromOffset(LIST_W + 2, h + 2)
+		StopTweens(frame)
+		if instant then frame.Size = size else Tween(frame, KB_TI, {Size = size}) end
+	end
+
+	local lastCollapsed
 	function L.Refresh()
 		if not W.Alive then return end
-		local shown = 0
+		local animate = W.Animate and frame.Visible and shownTarget
+		local shown, active, listed = 0, 0, 0
 		for i, e in ipairs(L.Entries) do
-			local visible = e.listed() and (L.ShowInactive or e.isActive() or e.pulse == true) and true or false
-			e.row.Visible = visible and not L.Collapsed
+			local isListed = e.listed() and true or false
+			local on = isListed and (e.isActive() or e.pulse == true) and true or false
+			local visible = isListed and (L.ShowInactive or on) and true or false
+			if isListed then listed = listed + 1 end
+			if on then active = active + 1 end
 			e.row.LayoutOrder = i
 			if visible then
 				shown = shown + 1
 				e.name.Text = e.getName()
 				e.mode.Text = e.getMode()
 				e.key.Text = e.getKey()
-				PaintEntry(e)
+				PaintEntry(e, not animate or not e.row.Visible)
+				if not e.row.Visible and animate and not L.Collapsed then FadeInRow(e) end
 			end
+			e.row.Visible = visible
 		end
-		empty.Visible = shown == 0 and not L.Collapsed
-		count.Text = shown > 0 and tostring(shown) or ""
-		chev.Rotation = L.Collapsed and 180 or 0
-		local any = false
-		for _, e in ipairs(L.Entries) do if e.listed() then any = true break end end
-		frame.Visible = L.Wanted and any and not W.KeyLocked
+		empty.Visible = shown == 0
+		badge.Visible = listed > 0
+		count.Text = L.ShowInactive and (active .. "/" .. listed) or tostring(active)
+		L.ActiveCount = active
+		Set(count, not animate, {TextColor3 = active > 0 and W.Accent or W.Theme.TextDim})
+
+		if lastCollapsed ~= L.Collapsed then
+			local instant = not animate or lastCollapsed == nil
+			lastCollapsed = L.Collapsed
+			StopTweens(chev, line)
+			Set(chev, instant, {Rotation = L.Collapsed and 180 or 0})
+			Set(line, instant, {BackgroundTransparency = L.Collapsed and 1 or 0})
+		end
+		Resize(shown, not animate)
+		SetShown(L.Wanted and listed > 0 and not W.KeyLocked)
 	end
 
 	W.Bind(function(T, accent)
+		local entryObjs = {}
+		for _, e in ipairs(L.Entries) do
+			for _, k in ipairs({"bar", "name", "mode", "pill", "pillStroke", "key", "row"}) do table.insert(entryObjs, e[k]) end
+		end
+		StopTweens(count, chev, table.unpack(entryObjs))
 		hIcon.ImageColor3 = accent
 		title.TextColor3 = T.Text
-		count.TextColor3 = T.TextDim
 		chev.ImageColor3 = T.NavGray
+		collapse.BackgroundColor3 = T.PopupHover
 		line.BackgroundColor3 = T.WmDivider
+		badge.BackgroundColor3 = T.DropdownBg
 		empty.TextColor3 = T.TextDim
-		for _, e in ipairs(L.Entries) do PaintEntry(e) end
+		for _, e in ipairs(L.Entries) do
+			e.name.TextTransparency, e.mode.TextTransparency, e.key.TextTransparency = 0, 0, 0
+		end
+		chev.Rotation = L.Collapsed and 180 or 0
+		line.BackgroundTransparency = L.Collapsed and 1 or 0
+		count.TextColor3 = (L.ActiveCount or 0) > 0 and accent or T.TextDim
+		for _, e in ipairs(L.Entries) do PaintEntry(e, true) end
 	end, frame)
 
-	collapse.MouseButton1Click:Connect(function()
-		L.Collapsed = not L.Collapsed
-		L.Refresh()
-	end)
+	collapse.MouseButton1Click:Connect(ToggleCollapsed)
+	collapse.MouseEnter:Connect(function() Tween(collapse, KB_STATE_TI, {BackgroundTransparency = 0.4}) end)
+	collapse.MouseLeave:Connect(function() Tween(collapse, KB_STATE_TI, {BackgroundTransparency = 1}) end)
 
 	-- e: getName, getKey, getMode, isActive, enabled, listed, trigger(down)
 	function L.Add(e)
@@ -2041,12 +2198,20 @@ local function BuildKeybindList(W, cfg)
 			BackgroundTransparency = 1,
 			Text = "",
 			AutoButtonColor = false,
+			Visible = false,
 			Parent = body,
 		})
 		e.row = row
-		e.bar = Create("Frame", {Size = UDim2.new(0, 2, 0, ROW_H - 10), Position = UDim2.fromOffset(5, 5), BorderSizePixel = 0, Parent = row})
+		e.bar = Create("Frame", {
+			AnchorPoint = Vector2.new(0, 0.5),
+			Size = UDim2.new(0, 2, 0, 0),
+			Position = UDim2.new(0, 6, 0.5, 0),
+			BackgroundTransparency = 1,
+			BorderSizePixel = 0,
+			Parent = row,
+		})
 		Corner(e.bar, 1)
-		e.name = Label(row, "", {Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -96, 1, 0), Truncate = true})
+		e.name = Label(row, "", {Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -100, 1, 0), Truncate = true})
 		local right = Create("Frame", {
 			AnchorPoint = Vector2.new(1, 0.5),
 			Position = UDim2.new(1, -8, 0.5, 0),
@@ -2066,13 +2231,19 @@ local function BuildKeybindList(W, cfg)
 		e.mode = Label(right, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10})
 		e.mode.LayoutOrder = 1
 		e.pill = Create("Frame", {Size = UDim2.new(0, 0, 0, 16), AutomaticSize = Enum.AutomaticSize.X, BorderSizePixel = 0, LayoutOrder = 2, Parent = right})
-		Corner(e.pill, 3)
+		Corner(e.pill, 4)
 		e.pillStroke = Stroke(e.pill, WHITE, 1)
 		Create("UIPadding", {PaddingLeft = UDim.new(0, 6), PaddingRight = UDim.new(0, 6), Parent = e.pill})
-		e.key = Label(e.pill, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10})
+		e.key = Label(e.pill, "", {AutoX = true, Size = UDim2.new(0, 0, 1, 0), TextSize = 10, Weight = "SemiBold"})
 		e.conn = BindPress(W, row, function() e.trigger(true) end, function() e.trigger(false) end)
-		row.MouseEnter:Connect(function() row.BackgroundTransparency = 0.4 end)
-		row.MouseLeave:Connect(function() row.BackgroundTransparency = 1 end)
+		row.MouseEnter:Connect(function()
+			e.hover = true
+			PaintEntry(e, not W.Animate)
+		end)
+		row.MouseLeave:Connect(function()
+			e.hover = nil
+			PaintEntry(e, not W.Animate)
+		end)
 		table.insert(L.Entries, e)
 		L.Refresh()
 		return e
@@ -2092,13 +2263,19 @@ local function BuildKeybindList(W, cfg)
 			if W.Alive then L.Refresh() end
 		end)
 	end
+	function L.SetCollapsed(b)
+		L.Collapsed = b == true
+		L.Refresh()
+	end
 
 	local api = {}
 	Method(api, "SetVisible", function(b) L.Wanted = b ~= false L.Refresh() end)
 	Method(api, "IsVisible", function() return L.Wanted end)
 	Method(api, "Toggle", function() api.SetVisible(not L.Wanted) end)
 	Method(api, "SetShowInactive", function(b) L.ShowInactive = b ~= false L.Refresh() end)
-	Method(api, "SetCollapsed", function(b) L.Collapsed = b == true L.Refresh() end)
+	Method(api, "SetCollapsed", function(b) L.SetCollapsed(b) end)
+	Method(api, "IsCollapsed", function() return L.Collapsed end)
+	Method(api, "ToggleCollapsed", ToggleCollapsed)
 	Method(api, "SetTitle", function(t) title.Text = tostring(t) end)
 	Method(api, "SetPosition", function(p) frame.Position = p end)
 	Method(api, "Refresh", function() L.Refresh() end)

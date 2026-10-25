@@ -15,6 +15,7 @@ local Window = Library:CreateWindow({
 	KeybindList = {
 		Visible = true,
 		ShowInactive = true,   -- false = only show binds that are currently on
+		Collapsed = false,     -- start collapsed; click the header or chevron to expand/collapse (animated)
 		-- Position = UDim2.fromOffset(8, 42),
 	},
 	Watermark = {
