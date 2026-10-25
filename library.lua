@@ -1897,6 +1897,452 @@ local function AddPlainButton(W, S, o)
 	return el
 end
 
+-- On-screen keyboard used instead of the phone's native one: compact PC layout, draggable.
+-- One shared instance; it follows whichever TextBox was tapped.
+local VKB_KEY, VKB_GAP, VKB_PAD, VKB_HEAD = 24, 3, 6, 26
+local VKB_UNIT = VKB_KEY + VKB_GAP
+local VKB_W = VKB_PAD * 2 + 15 * VKB_UNIT - VKB_GAP
+local VKB_H = VKB_PAD + VKB_HEAD + 4 + 5 * VKB_UNIT - VKB_GAP + VKB_PAD
+local VKB_IN = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
+local VKB_OUT = TweenInfo.new(0.2, Enum.EasingStyle.Quint, Enum.EasingDirection.In)
+local VKB_HIDDEN = 0.94
+
+local function VKeys(row)
+	local out = {}
+	for c in row:gmatch(".") do table.insert(out, {c, c:upper(), letter = true}) end
+	return out
+end
+local function VJoin(...)
+	local out = {}
+	for _, part in ipairs({...}) do
+		if type(part[1]) == "table" then
+			for _, k in ipairs(part) do table.insert(out, k) end
+		else
+			table.insert(out, part)
+		end
+	end
+	return out
+end
+local VKB_ROWS = {
+	VJoin({"`", "~"}, {"1", "!"}, {"2", "@"}, {"3", "#"}, {"4", "$"}, {"5", "%"}, {"6", "^"}, {"7", "&"},
+		{"8", "*"}, {"9", "("}, {"0", ")"}, {"-", "_"}, {"=", "+"}, {act = "back", w = 2, icon = {"delete"}, label = "Back"}),
+	VJoin({act = "clear", w = 1.5, label = "Clear"}, VKeys("qwertyuiop"), {"[", "{"}, {"]", "}"}, {"\\", "|", w = 1.5}),
+	VJoin({act = "caps", w = 1.75, label = "Caps"}, VKeys("asdfghjkl"), {";", ":"}, {"'", "\""},
+		{act = "enter", w = 2.25, label = "Enter"}),
+	VJoin({act = "shift", w = 2.25, label = "Shift"}, VKeys("zxcvbnm"), {",", "<"}, {".", ">"}, {"/", "?"},
+		{act = "shift", w = 2.75, label = "Shift"}),
+	VJoin({act = "left", w = 1.5, icon = {"chevron-left"}, label = "<"}, {act = "right", w = 1.5, icon = {"chevron-right"}, label = ">"},
+		{act = "space", w = 9.5, label = ""}, {act = "hide", w = 2.5, icon = {"keyboard-off", "chevron-down"}, label = "Hide"}),
+}
+
+local function UseVKeyboard()
+	local m = Library.CustomKeyboard
+	if m == false or m == "Off" then return false end
+	if m == true or m == "Always" then return true end
+	return UserInputService.TouchEnabled == true and UserInputService.KeyboardEnabled ~= true
+end
+
+local function RichEscape(s)
+	return (s:gsub("&", "&amp;"):gsub("<", "&lt;"):gsub(">", "&gt;"))
+end
+local function HexOf(c)
+	return ("#%02X%02X%02X"):format(math.floor(c.R * 255 + 0.5), math.floor(c.G * 255 + 0.5), math.floor(c.B * 255 + 0.5))
+end
+
+local VKB = {Covers = setmetatable({}, {__mode = "k"})}
+
+function VKB.Build()
+	if VKB.Keys then return end
+	local gui = Create("ScreenGui", {
+		Name = "ZeninKeyboard",
+		ResetOnSpawn = false,
+		IgnoreGuiInset = true,
+		DisplayOrder = 200,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+	})
+	local root = Create("Frame", {
+		Size = UDim2.fromOffset(VKB_W, VKB_H),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		BackgroundTransparency = 1,
+		Visible = false,
+		Parent = gui,
+	})
+	local scaler = Create("UIScale", {Parent = root})
+	local panel = Create("Frame", {Size = UDim2.fromScale(1, 1), BorderSizePixel = 0, Active = true, Parent = root})
+	Corner(panel, 6)
+	local stroke = Stroke(panel, WHITE, 1)
+
+	local head = Create("Frame", {
+		Size = UDim2.new(1, -VKB_PAD * 2, 0, VKB_HEAD),
+		Position = UDim2.fromOffset(VKB_PAD, VKB_PAD),
+		BackgroundTransparency = 1,
+		Active = true,
+		Parent = panel,
+	})
+	local grip = CreateIcon(head, {"grip-horizontal", "grip", "move"}, 14, UDim2.new(0, 3, 0.5, -7))
+	local field = Create("Frame", {
+		Size = UDim2.new(1, -24, 1, 0),
+		Position = UDim2.fromOffset(24, 0),
+		BorderSizePixel = 0,
+		ClipsDescendants = true,
+		Parent = head,
+	})
+	Corner(field, 4)
+	local fieldStroke = Stroke(field, WHITE, 1)
+	local preview = Create("TextLabel", {
+		Size = UDim2.new(1, -16, 1, 0),
+		Position = UDim2.fromOffset(8, 0),
+		BackgroundTransparency = 1,
+		Text = "",
+		RichText = true,
+		TextSize = TEXT,
+		Weight = "Medium",
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		Parent = field,
+	})
+
+	VKB.Gui, VKB.Root, VKB.Scaler, VKB.Panel = gui, root, scaler, panel
+	VKB.Stroke, VKB.Grip, VKB.Field, VKB.FieldStroke, VKB.Preview = stroke, grip, field, fieldStroke, preview
+	VKB.Keys = {}
+
+	local y = VKB_PAD + VKB_HEAD + 4
+	for _, row in ipairs(VKB_ROWS) do
+		local x = VKB_PAD
+		for _, spec in ipairs(row) do
+			local w = (spec.w or 1) * VKB_UNIT - VKB_GAP
+			local b = Create("TextButton", {
+				Size = UDim2.fromOffset(w, VKB_KEY),
+				Position = UDim2.fromOffset(x, y),
+				BorderSizePixel = 0,
+				Text = "",
+				Parent = panel,
+			})
+			Corner(b, 4)
+			local k = {spec = spec, btn = b, stroke = Stroke(b, WHITE, 1)}
+			local hasIcon = false
+			if spec.icon then
+				k.icon = CreateIcon(b, nil, 12, UDim2.new(0.5, -6, 0.5, -6))
+				hasIcon = ApplyIcon(k.icon, spec.icon)
+				k.icon.Visible = hasIcon
+			end
+			if not hasIcon then
+				k.label = Label(b, spec.label or spec[1], {
+					TextSize = spec.act and 10 or TEXT,
+					Weight = spec.act and "SemiBold" or "Medium",
+					Align = Enum.TextXAlignment.Center,
+				})
+			end
+			b.InputBegan:Connect(function(input)
+				if IsClickOrTouch(input) then VKB.Press(k, input) end
+			end)
+			table.insert(VKB.Keys, k)
+			x = x + w + VKB_GAP
+		end
+		y = y + VKB_UNIT
+	end
+
+	VKB.Held = {}
+	UserInputService.InputEnded:Connect(function(input)
+		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
+		local k = VKB.Held[id]
+		if k then
+			VKB.Held[id] = nil
+			VKB.Release(k)
+		end
+		if VKB.Drag and VKB.Drag.id == id then VKB.Drag = nil end
+	end)
+
+	head.InputBegan:Connect(function(input)
+		if not IsClickOrTouch(input) then return end
+		local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
+		VKB.Drag = {id = id, from = Vector2.new(input.Position.X, input.Position.Y), start = root.Position}
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		local d = VKB.Drag
+		if not d then return end
+		local isTouch = input.UserInputType == Enum.UserInputType.Touch
+		if (isTouch and input ~= d.id) or (not isTouch and (input.UserInputType ~= Enum.UserInputType.MouseMovement or d.id ~= Enum.UserInputType.MouseButton1)) then
+			return
+		end
+		local delta = Vector2.new(input.Position.X, input.Position.Y) - d.from
+		VKB.Place(d.start.X.Offset + delta.X, d.start.Y.Offset + delta.Y)
+	end)
+end
+
+-- Keeps the keyboard fully on screen; position is the panel centre.
+function VKB.Place(x, y)
+	local vp = VKB.Gui.AbsoluteSize
+	local hw, hh = VKB_W * VKB.Fit / 2, VKB_H * VKB.Fit / 2
+	x = math.clamp(x, hw, math.max(hw, vp.X - hw))
+	y = math.clamp(y, hh, math.max(hh, vp.Y - hh))
+	VKB.Root.Position = UDim2.fromOffset(x, y)
+	VKB.Pos = Vector2.new(x, y)
+end
+
+function VKB.Paint()
+	local src = VKB.Opts.theme
+	local T, accent, alpha = src.Theme, src.Accent, src.AccentAlpha or 1
+	VKB.Panel.BackgroundColor3 = T.WmBg
+	VKB.Stroke.Color = T.WmStroke
+	VKB.Grip.ImageColor3 = T.NavGray
+	VKB.Field.BackgroundColor3 = T.DropdownBg
+	VKB.FieldStroke.Color = accent
+	VKB.FieldStroke.Transparency = 1 - alpha
+	VKB.Preview.TextColor3 = T.Text
+	for _, k in ipairs(VKB.Keys) do VKB.PaintKey(k) end
+end
+
+function VKB.PaintKey(k)
+	local src = VKB.Opts and VKB.Opts.theme
+	if not src then return end
+	local T, accent, alpha = src.Theme, src.Accent, src.AccentAlpha or 1
+	local act = k.spec.act
+	local on = (act == "shift" and VKB.Shift) or (act == "caps" and VKB.Caps)
+	local bg = act and T.TileBg or T.DropdownBg
+	if act == "enter" then bg = T.DropdownBg:Lerp(accent, 0.3 * alpha) end
+	if k.down then bg = T.TileHover end
+	k.btn.BackgroundColor3 = bg
+	k.stroke.Color = on and accent or T.DropdownBorder
+	k.stroke.Transparency = on and (1 - alpha) or 0
+	local fg = on and accent or (act and act ~= "enter" and T.TextGray or T.Text)
+	if k.label then k.label.TextColor3 = fg end
+	if k.icon then k.icon.ImageColor3 = fg end
+end
+
+function VKB.Labels()
+	local upper = VKB.Caps ~= VKB.Shift
+	for _, k in ipairs(VKB.Keys) do
+		local s = k.spec
+		if not s.act and k.label then
+			if s.letter then
+				k.label.Text = upper and s[2] or s[1]
+			else
+				k.label.Text = VKB.Shift and s[2] or s[1]
+			end
+		end
+		VKB.PaintKey(k)
+	end
+end
+
+function VKB.Render()
+	local text, cur = VKB.Text, VKB.Cursor
+	local before, after = text:sub(1, cur), text:sub(cur + 1)
+	if #before > 48 then before = "..." .. before:sub(-48) end
+	local src = VKB.Opts.theme
+	local caret = ('<font color="%s">|</font>'):format(HexOf(src.Accent))
+	if text == "" and VKB.Target and VKB.Target.PlaceholderText ~= "" then
+		VKB.Preview.Text = caret .. ('<font color="%s">%s</font>'):format(HexOf(src.Theme.TextDim), RichEscape(VKB.Target.PlaceholderText))
+	else
+		VKB.Preview.Text = RichEscape(before) .. caret .. RichEscape(after)
+	end
+end
+
+function VKB.SetText(text, cursor)
+	local box = VKB.Target
+	if not box then return end
+	box.Text = text
+	-- The box's own handlers may trim it (MaxLength etc.), so read back what stuck.
+	VKB.Text = box.Text
+	VKB.Cursor = math.clamp(cursor, 0, #VKB.Text)
+	VKB.Render()
+end
+
+local function PrevChar(text, cur)
+	if cur <= 0 then return 0 end
+	local ok, p = pcall(utf8.offset, text, -1, cur + 1)
+	return (ok and p or cur) - 1
+end
+local function NextChar(text, cur)
+	if cur >= #text then return #text end
+	local ok, p = pcall(utf8.offset, text, 2, cur + 1)
+	return ok and p and (p - 1) or cur + 1
+end
+
+function VKB.Act(k)
+	local s, text, cur = k.spec, VKB.Text, VKB.Cursor
+	local act = s.act
+	if not act or act == "space" then
+		local ch = " "
+		if not act then
+			if s.letter then
+				ch = (VKB.Caps ~= VKB.Shift) and s[2] or s[1]
+			else
+				ch = VKB.Shift and s[2] or s[1]
+			end
+		end
+		VKB.SetText(text:sub(1, cur) .. ch .. text:sub(cur + 1), cur + #ch)
+		if VKB.Shift then
+			VKB.Shift = false
+			VKB.Labels()
+		end
+	elseif act == "back" then
+		local p = PrevChar(text, cur)
+		VKB.SetText(text:sub(1, p) .. text:sub(cur + 1), p)
+	elseif act == "clear" then
+		VKB.SetText("", 0)
+	elseif act == "left" then
+		VKB.Cursor = PrevChar(text, cur)
+		VKB.Render()
+	elseif act == "right" then
+		VKB.Cursor = NextChar(text, cur)
+		VKB.Render()
+	elseif act == "shift" then
+		VKB.Shift = not VKB.Shift
+		VKB.Labels()
+	elseif act == "caps" then
+		VKB.Caps = not VKB.Caps
+		VKB.Labels()
+	elseif act == "enter" then
+		VKB.Close(true)
+	elseif act == "hide" then
+		VKB.Close(false)
+	end
+end
+
+local VKB_REPEAT = {back = true, left = true, right = true}
+function VKB.Press(k, input)
+	if not VKB.Target then return end
+	local id = input.UserInputType == Enum.UserInputType.Touch and input or input.UserInputType
+	VKB.Held[id] = k
+	k.down = (k.down or 0) + 1
+	k.tok = (k.tok or 0) + 1
+	VKB.PaintKey(k)
+	VKB.Act(k)
+	if VKB_REPEAT[k.spec.act] then
+		local tok = k.tok
+		task.delay(0.4, function()
+			while k.tok == tok and k.down and VKB.Target do
+				VKB.Act(k)
+				task.wait(0.05)
+			end
+		end)
+	end
+end
+
+function VKB.Release(k)
+	k.down = k.down and k.down > 1 and k.down - 1 or nil
+	if not k.down then k.tok = (k.tok or 0) + 1 end
+	VKB.PaintKey(k)
+end
+
+local function OnScreen(obj)
+	local o = obj
+	while o do
+		if o:IsA("ScreenGui") then return o.Enabled and o.Parent ~= nil end
+		if o:IsA("GuiObject") and not o.Visible then return false end
+		o = o.Parent
+	end
+	return false
+end
+
+function VKB.Show(show)
+	VKB.Shown = show
+	VKB.ShowTok = (VKB.ShowTok or 0) + 1
+	local tok = VKB.ShowTok
+	local root, scaler = VKB.Root, VKB.Scaler
+	StopTweens(scaler)
+	if show then
+		root.Visible = true
+		scaler.Scale = VKB.Fit * VKB_HIDDEN
+		Tween(scaler, VKB_IN, {Scale = VKB.Fit})
+	else
+		Tween(scaler, VKB_OUT, {Scale = VKB.Fit * VKB_HIDDEN})
+	end
+	FadeContent(VKB.Panel, root, UDim2.fromScale(1, 1), show, show and VKB_IN or VKB_OUT, 1, function()
+		if VKB.ShowTok == tok and not show then root.Visible = false end
+	end)
+end
+
+function VKB.Open(box, opts)
+	if VKB.Target == box then return end
+	if VKB.Target then VKB.Close(false, true) end
+	VKB.Build()
+	local sg = box:FindFirstAncestorWhichIsA("ScreenGui")
+	if not sg then return end
+	VKB.Gui.Parent = sg.Parent
+	VKB.Gui.DisplayOrder = sg.DisplayOrder + 50
+	VKB.Target, VKB.Opts = box, opts
+	VKB.Shift = false
+	if opts.onFocus then SafeCall(opts.onFocus) end
+	if box.ClearTextOnFocus then box.Text = "" end
+	VKB.Text = box.Text
+	VKB.Cursor = #VKB.Text
+	VKB.Held = {}
+	for _, k in ipairs(VKB.Keys) do k.down, k.tok = nil, (k.tok or 0) + 1 end
+
+	local vp = VKB.Gui.AbsoluteSize
+	if vp.X < 1 then vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(800, 600) end
+	VKB.Fit = math.max(0.5, math.min(1, (vp.X - 16) / VKB_W, (vp.Y * 0.6) / VKB_H)) * (tonumber(Library.KeyboardScale) or 1)
+	if VKB.Pos then
+		VKB.Place(VKB.Pos.X, VKB.Pos.Y)
+	else
+		VKB.Place(vp.X / 2, vp.Y - VKB_H * VKB.Fit / 2 - 12)
+	end
+	VKB.Labels()
+	VKB.Paint()
+	VKB.Render()
+	if not VKB.Shown then VKB.Show(true) end
+
+	if VKB.Watch then VKB.Watch:Disconnect() end
+	VKB.Watch = RunService.Heartbeat:Connect(function()
+		local b = VKB.Target
+		if b and (not b.Parent or not b.TextEditable or not OnScreen(b)) then VKB.Close(false) end
+	end)
+end
+
+-- switching: another box is about to open, so skip the hide animation.
+function VKB.Close(enter, switching)
+	local box, opts = VKB.Target, VKB.Opts
+	if not box then return end
+	VKB.Target = nil
+	if VKB.Watch then
+		VKB.Watch:Disconnect()
+		VKB.Watch = nil
+	end
+	if not switching then VKB.Show(false) end
+	if opts and opts.onBlur then SafeCall(opts.onBlur, enter and true or false) end
+end
+
+-- Routes a TextBox through the on-screen keyboard when it applies (phones by default).
+-- onFocus()/onBlur(enterPressed) fire for both keyboards. Returns focus() for code that
+-- wants to open the box programmatically.
+local function AttachKeyboard(box, themeSrc, onFocus, onBlur)
+	local opts = {theme = themeSrc, onFocus = onFocus, onBlur = onBlur}
+	if onFocus then box.Focused:Connect(onFocus) end
+	if onBlur then box.FocusLost:Connect(function(enter) onBlur(enter) end) end
+	local cover = Create("TextButton", {
+		Size = UDim2.fromScale(1, 1),
+		BackgroundTransparency = 1,
+		Text = "",
+		ZIndex = box.ZIndex + 1,
+		Visible = UseVKeyboard(),
+		Parent = box,
+	})
+	VKB.Covers[cover] = true
+	local function Focus()
+		if not box.TextEditable then return end
+		if UseVKeyboard() then
+			if box:IsFocused() then box:ReleaseFocus() end
+			VKB.Open(box, opts)
+		else
+			box:CaptureFocus()
+		end
+	end
+	cover.Activated:Connect(Focus)
+	return Focus
+end
+
+Method(Library, "SetCustomKeyboard", function(mode)
+	Library.CustomKeyboard = mode
+	local on = UseVKeyboard()
+	for cover in pairs(VKB.Covers) do
+		if cover.Parent then cover.Visible = on end
+	end
+	if not on and VKB.Target then VKB.Close(false) end
+end)
+Method(Library, "CloseKeyboard", function() VKB.Close(false) end)
+
 local function AddInput(W, S, o)
 	o = Opts(o)
 	local el, row = NewElement(W, S, "Input", o, 25)
@@ -1978,11 +2424,10 @@ local function AddInput(W, S, o)
 	OnMouseEnter(box, function() inHover = true el._apply(true) end)
 	box.MouseLeave:Connect(function() inHover = false el._apply(true) end)
 
-	box.Focused:Connect(function()
+	local focusBox = AttachKeyboard(box, W, function()
 		focused = true
 		el._apply(true)
-	end)
-	box.FocusLost:Connect(function()
+	end, function()
 		focused = false
 		el._apply(true)
 		Commit(box.Text)
@@ -2001,7 +2446,7 @@ local function AddInput(W, S, o)
 	Method(el, "Get", Out)
 	Method(el, "SetName", function(t) lbl.Text = tostring(t) end)
 	Method(el, "SetPlaceholder", function(t) box.PlaceholderText = tostring(t or "") end)
-	Method(el, "Focus", function() if el.Enabled then box:CaptureFocus() end end)
+	Method(el, "Focus", function() if el.Enabled then focusBox() end end)
 	Method(el, "Clear", function(silent) Commit("", silent) end)
 
 	Commit(o.Default or o.Value or "", true)
@@ -3542,8 +3987,7 @@ local function AddStepper(W, S, o)
 			el._apply(true)
 		end)
 	end
-	box.Focused:Connect(function() box.Text = FormatNumber(value, decimals) end)
-	box.FocusLost:Connect(function()
+	AttachKeyboard(box, W, function() box.Text = FormatNumber(value, decimals) end, function()
 		local text = box.Text:gsub("[^%d%.%-]", "")
 		SetValue(tonumber(text) or value)
 	end)
@@ -5163,6 +5607,7 @@ local function BuildConfigs(W, Window)
 		Parent = actions._raw(25),
 	})
 	Corner(box, 3)
+	AttachKeyboard(box, W)
 	local boxStroke = Stroke(box, WHITE, 1)
 	Create("UIPadding", {PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9), Parent = box})
 	W.Bind(function(T)
@@ -5595,11 +6040,12 @@ local function RunKeySystem(ks, ctx)
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		Parent = boxFrame,
 	})
-	box.Focused:Connect(function()
+	local onKeyEnter
+	AttachKeyboard(box, K, function()
 		Anim(boxStroke, {Color = K.Accent, Transparency = 1 - K.AccentAlpha}, true)
-	end)
-	box.FocusLost:Connect(function()
+	end, function(enter)
 		Anim(boxStroke, {Color = T.DropdownBorder, Transparency = 0}, true)
+		if enter and onKeyEnter then onKeyEnter() end
 	end)
 
 	local link = ks.GetKeyLink or ks.Link or ks.KeyLink
@@ -5735,7 +6181,7 @@ local function RunKeySystem(ks, ctx)
 	end
 
 	verifyBtn.MouseButton1Click:Connect(function() Attempt(box.Text) end)
-	box.FocusLost:Connect(function(enter) if enter then Attempt(box.Text) end end)
+	onKeyEnter = function() Attempt(box.Text) end
 	closeBtn.MouseButton1Click:Connect(function()
 		if ks.CanClose ~= false then Finish(false) end
 	end)
@@ -5766,6 +6212,7 @@ end
 
 local function CreateWindow(o)
 	o = Opts(o)
+	if o.CustomKeyboard ~= nil then Library.SetCustomKeyboard(o.CustomKeyboard) end
 	if o.Name and not o.Title then o.Title = o.Name end
 	-- Runs before any window or API exists, so nothing below is reachable until a key passes.
 	local keyCfg, keyCtx, keyInfo
