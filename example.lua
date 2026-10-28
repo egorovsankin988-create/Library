@@ -9,7 +9,9 @@ local Window = Library:CreateWindow({
 	ToggleKey = Enum.KeyCode.RightShift,
 	ConfigFolder = "ZeninDemo",
 	Animation = true, -- open/close fade + scale animation (set false to disable)
-	-- Draggable PC-style on-screen keyboard on phones/tablets (PC always keeps the normal keyboard). false = off.
+	-- On-screen keyboard on phones/tablets (PC always keeps the normal keyboard). false = off.
+	-- Opens full-width; its minimise button turns it into a small draggable panel.
+	-- Library:SetKeyboardCompact(true) starts it small.
 	CustomKeyboard = true,
 	Configs = true,
 	-- Floating list of keybinds. Tap/click a row to trigger it, which is how binds work on phones.
